@@ -13,7 +13,7 @@ dependencies:
   file_picker: ^6.0.0
   flutter_equalizer: ^0.0.5
   flutter_audio_waveforms: ^1.0.6
-  flutter_media_metadata: ^0.2.0
+  flutter_media_finder: ^1.0.3
   shared_preferences: ^2.2.0
 
 dev_dependencies:
