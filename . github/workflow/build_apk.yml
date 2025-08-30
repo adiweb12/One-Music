@@ -1,0 +1,51 @@
+name: Build ONE Ultimate APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Set up Flutter
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.13.6"
+
+      # Get dependencies
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # Create Android folder if it does not exist
+      - name: Generate Android folder if missing
+        run: |
+          if [ ! -d "./android" ]; then
+            flutter create .
+          fi
+
+      # Ensure INTERNET permission is in AndroidManifest.xml
+      - name: Add INTERNET permission
+        run: |
+          MANIFEST="./android/app/src/main/AndroidManifest.xml"
+          if ! grep -q 'android.permission.INTERNET' $MANIFEST; then
+            sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />' $MANIFEST
+          fi
+
+      # Build release APK
+      - name: Build APK
+        run: flutter build apk --release
+
+      # Upload APK artifact
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: ONE-Ultimate-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
