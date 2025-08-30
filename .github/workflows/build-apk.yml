@@ -43,9 +43,9 @@ jobs:
       - name: Build APK
         run: flutter build apk --release
 
-      # Upload APK artifact
+      # Upload APK artifact (fixed to v4)
       - name: Upload APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ONE-Ultimate-APK
           path: build/app/outputs/flutter-apk/app-release.apk
