@@ -32,6 +32,7 @@ class Group(db.Model):
     name = db.Column(db.String(100), nullable=False)
     members = db.Column(JSONB, default=[])
     admin = db.Column(db.String(50), db.ForeignKey('users.username'), nullable=False)
+    edit_count = db.Column(db.Integer, default=0)
 
 class Message(db.Model):
     __tablename__ = 'messages'
@@ -185,7 +186,7 @@ def get_profile():
         for gnum in user_obj.groups:
             grp = Group.query.get(gnum)
             if grp:
-                user_groups.append({"name": grp.name, "number": gnum})
+                user_groups.append({"name": grp.name, "number": gnum, "admin": grp.admin})
 
     return jsonify({
         "success": True,
@@ -261,6 +262,7 @@ def get_messages(group_number):
         sender_name = User.query.get(m.sender).name if User.query.get(m.sender) else m.sender
         messages_list.append({
             "sender": sender_name,
+            "sender_username": m.sender,
             "message": m.message,
             "time": m.time.isoformat()
         })
@@ -295,7 +297,7 @@ def leave_group():
 
     group.members.remove(user)
     user_obj = User.query.get(user)
-    if user_obj:
+    if user_obj and group_number in user_obj.groups:
         user_obj.groups.remove(group_number)
 
     db.session.commit()
@@ -331,6 +333,33 @@ def delete_group():
     db.session.delete(group)
     db.session.commit()
     return jsonify({"success": True, "message": "Group deleted successfully!"})
+
+# -------------------- UPDATE GROUP NAME (ADMIN ONLY) --------------------
+@app.route("/update_group_name", methods=["POST"])
+def update_group_name():
+    data = request.get_json()
+    token = data.get("token")
+    group_number = data.get("groupNumber")
+    new_group_name = data.get("newGroupName")
+
+    user = authenticate(token)
+    if not user:
+        return jsonify({"success": False, "message": "Unauthorized!"}), 401
+    
+    group = Group.query.get(group_number)
+    if not group:
+        return jsonify({"success": False, "message": "Group not found!"}), 404
+    
+    if user != group.admin:
+        return jsonify({"success": False, "message": "Only the admin can edit the group name."}), 403
+
+    if group.edit_count >= 2:
+        return jsonify({"success": False, "message": "Group name can only be edited twice."}), 400
+
+    group.name = new_group_name
+    group.edit_count += 1
+    db.session.commit()
+    return jsonify({"success": True, "message": "Group name updated successfully!"})
 
 # -------------------- RUN SERVER --------------------
 if __name__ == "__main__":
