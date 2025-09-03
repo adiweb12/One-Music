@@ -23,18 +23,18 @@ db = SQLAlchemy(app)
 
 class User(db.Model):
     id = db.Column(db.String, primary_key=True)
-    name = db.Column(db.String, nullable=True) # Added name field
+    name = db.Column(db.String, nullable=True)
     password = db.Column(db.String, nullable=False)
     token = db.Column(db.String, unique=True, nullable=True)
     groups = db.Column(JSONB, default=list)
 
 class Group(db.Model):
     id = db.Column(db.String, primary_key=True)
-    name = db.Column(db.String, nullable=False) # Added name field
-    admin = db.Column(db.String, nullable=False) # Added admin field
+    name = db.Column(db.String, nullable=False)
+    admin = db.Column(db.String, nullable=False)
     members = db.Column(JSONB, default=list)
     messages = db.Column(JSONB, default=list)
-    edit_count = db.Column(db.Integer, default=0) # Added edit count for group name
+    edit_count = db.Column(db.Integer, default=0)
 
 # ==============================
 # Helper Functions
@@ -56,12 +56,17 @@ def get_india_time():
 # API Routes
 # ==============================
 
+# Added a new route for the root URL
+@app.route("/")
+def index():
+    return "The server is running!", 200
+
 @app.route("/signup", methods=["POST"])
 def signup():
     data = request.get_json()
     username = data.get("username")
     password = data.get("password")
-    name = data.get("name") # Get name from request
+    name = data.get("name")
 
     if not username or not password or not name:
         return jsonify({"success": False, "message": "Username, password, and name are required."}), 400
@@ -185,7 +190,7 @@ def send_message():
     data = request.get_json()
     token = data.get("token")
     group_number = data.get("groupNumber")
-    text = data.get("message") # Changed from 'text' to 'message' to match Flutter
+    text = data.get("message")
     user_id = authenticate(token)
 
     if not user_id:
@@ -201,8 +206,8 @@ def send_message():
     user_obj = User.query.get(user_id)
     
     new_message = {
-        "user": user_obj.name, # Use user's name for display
-        "sender_username": user_id, # Use username to check if it's "me"
+        "user": user_obj.name,
+        "sender_username": user_id,
         "text": text,
         "time": get_india_time()
     }
