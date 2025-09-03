@@ -12,15 +12,13 @@ CORS(app)
 # ==============================
 # Database Configuration
 # ==============================
-
-app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://testbase_00su_user:umk115OrLKubuKjvaqolOaFfpfOQxSiI@dpg-d2s23oemcj7s73fp22b0-a/testbase_00su"
+app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://testbase_a998_user:5tLyYQZMQIGBsX3yi9Ht21iRRvJSJMf9@dpg-d2s3n2jipnbc73e71db0-a/testbase_a998"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 # ==============================
 # Database Models
 # ==============================
-
 class User(db.Model):
     id = db.Column(db.String, primary_key=True)
     name = db.Column(db.String, nullable=True)
@@ -39,7 +37,6 @@ class Group(db.Model):
 # ==============================
 # Helper Functions
 # ==============================
-
 def authenticate(token):
     """Find user by token"""
     if not token:
@@ -67,13 +64,12 @@ def signup():
     username = data.get("username")
     password = data.get("password")
     name = data.get("name")
-
     if not username or not password or not name:
         return jsonify({"success": False, "message": "Username, password, and name are required."}), 400
-
+    
     if User.query.get(username):
         return jsonify({"success": False, "message": "User already exists!"}), 400
-
+    
     hashed_password = generate_password_hash(password)
     new_user = User(id=username, password=hashed_password, name=name, groups=[])
     db.session.add(new_user)
@@ -85,11 +81,10 @@ def login():
     data = request.get_json()
     username = data.get("username")
     password = data.get("password")
-
     user = User.query.get(username)
     if not user or not check_password_hash(user.password, password):
         return jsonify({"success": False, "message": "Invalid credentials!"}), 401
-
+    
     user.token = str(uuid.uuid4())
     db.session.commit()
     return jsonify({"success": True, "token": user.token})
@@ -112,7 +107,7 @@ def profile():
                 "number": group.id,
                 "admin": group.admin
             })
-    
+            
     return jsonify({
         "success": True,
         "name": user_obj.name,
@@ -125,7 +120,6 @@ def update_profile():
     token = data.get("token")
     new_name = data.get("newName")
     user_id = authenticate(token)
-    
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
@@ -141,23 +135,24 @@ def create_group():
     group_name = data.get("groupName")
     group_number = data.get("groupNumber")
     user_id = authenticate(token)
-
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
     if not group_name or not group_number:
         return jsonify({"success": False, "message": "Group name and number are required."}), 400
-
+    
     if Group.query.get(group_number):
         return jsonify({"success": False, "message": "Group already exists!"}), 400
-
+    
     group = Group(id=group_number, name=group_name, admin=user_id, members=[user_id], messages=[])
     db.session.add(group)
-
+    
     user_obj = User.query.get(user_id)
     if group_number not in user_obj.groups:
         user_obj.groups.append(group_number)
-    
+        # Explicitly add the user object to the session to track changes to the JSONB field
+        db.session.add(user_obj)
+        
     db.session.commit()
     return jsonify({"success": True, "message": f"Group {group_number} created!"})
 
@@ -167,18 +162,18 @@ def join_group():
     token = data.get("token")
     group_number = data.get("groupNumber")
     user_id = authenticate(token)
-
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
     group = Group.query.get(group_number)
     if not group:
         return jsonify({"success": False, "message": "Group not found!"}), 404
-    
+        
     user_obj = User.query.get(user_id)
+    
     if user_id in group.members:
         return jsonify({"success": False, "message": "Already a member of this group."}), 400
-    
+        
     group.members.append(user_id)
     user_obj.groups.append(group_number)
     
@@ -192,19 +187,17 @@ def send_message():
     group_number = data.get("groupNumber")
     text = data.get("message")
     user_id = authenticate(token)
-
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
-    
+        
     group = Group.query.get(group_number)
     if not group:
         return jsonify({"success": False, "message": "Group not found!"}), 404
-    
+        
     if user_id not in group.members:
         return jsonify({"success": False, "message": "Not a member of this group."}), 403
-
+        
     user_obj = User.query.get(user_id)
-    
     new_message = {
         "user": user_obj.name,
         "sender_username": user_id,
@@ -221,17 +214,16 @@ def get_messages(group_number):
     data = request.get_json()
     token = data.get("token")
     user_id = authenticate(token)
-
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
+    
     group = Group.query.get(group_number)
     if not group:
         return jsonify({"success": False, "message": "Group not found!"}), 404
-
+        
     if user_id not in group.members:
         return jsonify({"success": False, "message": "Not a member of this group."}), 403
-
+        
     return jsonify({"success": True, "messages": group.messages}), 200
 
 @app.route("/delete_group", methods=["POST"])
@@ -240,7 +232,6 @@ def delete_group():
     token = data.get("token")
     group_number = data.get("groupNumber")
     user_id = authenticate(token)
-    
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
@@ -257,6 +248,8 @@ def delete_group():
         if member:
             if group_number in member.groups:
                 member.groups.remove(group_number)
+                # Explicitly add the member object to the session to track changes to the JSONB field
+                db.session.add(member)
     
     db.session.delete(group)
     db.session.commit()
@@ -268,23 +261,24 @@ def leave_group():
     token = data.get("token")
     group_number = data.get("groupNumber")
     user_id = authenticate(token)
-
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
-    
+        
     group = Group.query.get(group_number)
     if not group:
         return jsonify({"success": False, "message": "Group not found!"}), 404
-    
+        
     if user_id not in group.members:
         return jsonify({"success": False, "message": "You are not a member of this group."}), 400
-    
+        
     if group.admin == user_id:
         return jsonify({"success": False, "message": "Admin cannot leave the group. Please delete it instead."}), 400
-
+        
     user_obj = User.query.get(user_id)
+    
     group.members.remove(user_id)
     user_obj.groups.remove(group_number)
+    
     db.session.commit()
     return jsonify({"success": True, "message": "You have left the group."}), 200
 
@@ -295,7 +289,6 @@ def update_group_name():
     group_number = data.get("groupNumber")
     new_group_name = data.get("newGroupName")
     user_id = authenticate(token)
-    
     if not user_id:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
@@ -308,7 +301,7 @@ def update_group_name():
     
     if group.edit_count >= 2:
         return jsonify({"success": False, "message": "Group name can only be edited twice."}), 403
-
+    
     group.name = new_group_name
     group.edit_count += 1
     db.session.commit()
@@ -317,7 +310,6 @@ def update_group_name():
 # ==============================
 # Initialize Database
 # ==============================
-
 with app.app_context():
     db.create_all()
 
