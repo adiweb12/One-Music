@@ -13,7 +13,7 @@ CORS(app)
 # Database Configuration
 # ==============================
 
-app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://onechat_9v61_user:VupnDK5V2ng1prgHUMj3y5lq7wdW0e4h@dpg-d2ru0mffte5s739bn3m0-a/onechat_9v61"
+app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://testbase_00su_user:umk115OrLKubuKjvaqolOaFfpfOQxSiI@dpg-d2s23oemcj7s73fp22b0-a/testbase_00su"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
