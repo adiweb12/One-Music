@@ -97,10 +97,10 @@ def login():
         token = generate_token()
         session = Session.query.get(username)
         if session:
-            session.token = token
-        else:
-            new_session = Session(username=username, token=token)
-            db.session.add(new_session)
+            db.session.delete(session) # Delete old session
+        
+        new_session = Session(username=username, token=token) # Create new session
+        db.session.add(new_session)
         db.session.commit()
         return jsonify({"success": True, "message": "Login successful!", "token": token})
     else:
@@ -336,4 +336,3 @@ def delete_group():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
-
