@@ -4,14 +4,17 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime, timedelta, timezone
 import uuid
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 CORS(app)
 
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///chat.db"
+# ==============================
+# Database Configuration
+# ==============================
+app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://onechat_9v61_user:VupnDK5V2ng1prgHUMj3y5lq7wdW0e4h@dpg-d2ru0mffte5s739bn3m0-a/onechat_9v61"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
-
 
 # ==============================
 # Database Models
@@ -28,9 +31,8 @@ class Group(db.Model):
     members = db.Column(JSONB, default=list)  # List of usernames
     messages = db.Column(JSONB, default=list)  # Each message: {"user":..., "text":..., "time":...}
 
-
 # ==============================
-# Helpers
+# Helper Functions
 # ==============================
 def authenticate(token):
     """Find user by token"""
@@ -45,7 +47,6 @@ def get_india_time():
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S")
 
-
 # ==============================
 # API Routes
 # ==============================
@@ -58,7 +59,8 @@ def signup():
     if User.query.get(username):
         return jsonify({"success": False, "message": "User already exists!"}), 400
 
-    new_user = User(id=username, password=password, groups=[])
+    hashed_password = generate_password_hash(password)
+    new_user = User(id=username, password=hashed_password, groups=[])
     db.session.add(new_user)
     db.session.commit()
 
@@ -72,7 +74,7 @@ def login():
     password = data.get("password")
 
     user = User.query.get(username)
-    if not user or user.password != password:
+    if not user or not check_password_hash(user.password, password):
         return jsonify({"success": False, "message": "Invalid credentials!"}), 401
 
     user.token = str(uuid.uuid4())
@@ -148,7 +150,6 @@ def send_message():
     if user not in group.members:
         return jsonify({"success": False, "message": "Not a member of this group."}), 403
 
-    # Add message with IST timestamp
     group.messages = group.messages + [{
         "user": user,
         "text": text,
@@ -163,6 +164,8 @@ def send_message():
 def get_messages(group_number):
     data = request.get_json()
     token = data.get("token")
+    limit = data.get("limit", 50)       # default last 50 messages
+    offset = data.get("offset", 0)      # default start
 
     user = authenticate(token)
     if not user:
@@ -175,11 +178,11 @@ def get_messages(group_number):
     if user not in group.members:
         return jsonify({"success": False, "message": "Not a member of this group."}), 403
 
-    return jsonify({"success": True, "messages": group.messages})
-
+    messages = group.messages[-(offset+limit):] if group.messages else []
+    return jsonify({"success": True, "messages": messages}), 200
 
 # ==============================
-# Init DB
+# Initialize Database
 # ==============================
 with app.app_context():
     db.create_all()
