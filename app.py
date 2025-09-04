@@ -332,9 +332,9 @@ with app.app_context(): db.create_all()
 
 #==============================
 
-Entrypoint (Production-safe)
+#Entrypoint (Production-safe)
 
-==============================
+#==============================
 
 if name == "main": # Never enable debug in production port = int(os.getenv("PORT", "5000")) app.run(host="0.0.0.0", port=port, debug=False)
 
