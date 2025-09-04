@@ -4,4 +4,4 @@ Flask-Cors==4.0.1
 Flask-Limiter==3.4.1
 PyJWT==2.8.0
 psycopg2-binary==2.9.9
-Werkzeug==3.
+Werkzeug==3.0.1
