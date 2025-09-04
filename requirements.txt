@@ -7,3 +7,4 @@ python-socketio==5.11.3
 python-engineio==4.10.1
 eventlet==0.36.1
 greenlet==3.0.3
+gunicorn==22.0.0
