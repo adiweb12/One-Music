@@ -1,26 +1,3 @@
-Secure Flask Chat API — Render-ready
-
--------------------------------------------------
-
-What you get in this file:
-
-- ENV-based secrets & DB URL (no hardcoded creds)
-
-- JWT auth with expiry (replaces random UUID token)
-
-- Strong security headers (HSTS, CSP, etc.)
-
-- Strict CORS (configure ALLOWED_ORIGINS)
-
-- Rate limiting (login & general)
-
-- Safer JSONB handling (MutableList)
-
-- Basic input validation & limits
-
-- Production-safe (debug=False)
-
--------------------------------------------------
 
 import os import re import uuid from datetime import datetime, timedelta, timezone
 
@@ -36,15 +13,15 @@ Rate limiting
 
 from flask_limiter import Limiter from flask_limiter.util import get_remote_address
 
-==============================
+#==============================
 
-App & Security Configuration
+#App & Security Configuration
 
-==============================
+#==============================
 
 app = Flask(name)
 
---- Secrets & Config from ENV ---
+#--- Secrets & Config from ENV ---
 
 IMPORTANT: Set these in Render dashboard -> Environment
 
@@ -76,21 +53,21 @@ DB init
 
 db = SQLAlchemy(app)
 
-==============================
+#==============================
 
-Database Models
+#Database Models
 
-==============================
+#==============================
 
 class User(db.Model): id = db.Column(db.String, primary_key=True)  # username name = db.Column(db.String, nullable=True) password = db.Column(db.String, nullable=False)  # hashed # Deprecated: old token column (kept for backward compat, not used) token = db.Column(db.String, unique=True, nullable=True) groups = db.Column(MutableList.as_mutable(JSONB), default=list)
 
 class Group(db.Model): id = db.Column(db.String, primary_key=True)  # group number/code name = db.Column(db.String, nullable=False) admin = db.Column(db.String, nullable=False)  # username of admin members = db.Column(MutableList.as_mutable(JSONB), default=list) messages = db.Column(MutableList.as_mutable(JSONB), default=list) edit_count = db.Column(db.Integer, default=0)
 
-==============================
+#==============================
 
-Utility & Security Helpers
+#Utility & Security Helpers
 
-==============================
+#==============================
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-.]{3,32}$")
 
@@ -104,7 +81,7 @@ def validate_message(m: str) -> bool: return bool(m and 1 <= len(m) <= 2000)
 
 def get_india_time_iso() -> str: ist = timezone(timedelta(hours=5, minutes=30)) return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S")
 
---- JWT helpers ---
+#--- JWT helpers ---
 
 def make_jwt(sub: str) -> str: now = datetime.utcnow() payload = { "sub": sub, "iat": now, "exp": now + timedelta(minutes=JWT_TTL_MINUTES), "jti": str(uuid.uuid4()), "iss": JWT_ISSUER, } return jwt.encode(payload, app.config["SECRET_KEY"], algorithm=JWT_ALG)
 
@@ -112,19 +89,19 @@ def read_bearer_token() -> str | None: # Prefer Authorization: Bearer <token> au
 
 def authenticate() -> str | None: token = read_bearer_token() if not token: return None try: payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=[JWT_ALG], issuer=JWT_ISSUER) return payload.get("sub") except ExpiredSignatureError: return None except InvalidTokenError: return None
 
-==============================
+#==============================
 
 Security Headers (HSTS, CSP...)
 
-==============================
+#==============================
 
 @app.after_request def add_security_headers(resp): # Force HTTPS on browsers resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload" # Basic protections resp.headers["X-Content-Type-Options"] = "nosniff" resp.headers["X-Frame-Options"] = "DENY" resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin" # Minimal CSP (adjust if you serve inline scripts/fonts) resp.headers["Content-Security-Policy"] = ( "default-src 'self'; " "img-src 'self' data:; " "style-src 'self' 'unsafe-inline'; " "script-src 'self'; " "connect-src 'self'"  # allow API/XHR from same origin ) # Limit browser features resp.headers["Permissions-Policy"] = ( "camera=(), microphone=(), geolocation=(), usb=(), payment=()" ) # Caching for APIs resp.headers["Cache-Control"] = "no-store" return resp
 
-==============================
+#==============================
 
-Routes
+#Routes
 
-==============================
+#==============================
 
 @app.get("/") @limiter.limit("60/minute") def index(): return "The secure server is running!", 200
 
@@ -345,15 +322,15 @@ group.edit_count = (group.edit_count or 0) + 1
 db.session.commit()
 return jsonify({"success": True, "message": "Group name updated successfully!"}), 200
 
-==============================
+#==============================
 
-DB Init
+#DB Init
 
-==============================
+#==============================
 
 with app.app_context(): db.create_all()
 
-==============================
+#==============================
 
 Entrypoint (Production-safe)
 
