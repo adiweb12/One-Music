@@ -1,10 +1,7 @@
 Flask==3.0.3
+flask-cors==5.0.0
 Flask-SQLAlchemy==3.1.1
-Flask-Cors==4.0.0
-Flask-SocketIO==5.3.6
-Werkzeug==3.0.3
-python-socketio==5.11.3
-python-engineio==4.10.1
-eventlet==0.36.1
-greenlet==3.0.3
+SQLAlchemy==2.0.35
+psycopg2-binary==2.9.9
+Werkzeug==3.0.4
 gunicorn==22.0.0
