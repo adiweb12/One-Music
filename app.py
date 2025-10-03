@@ -1,412 +1,376 @@
-# app.py
+// -------------------- FLASK SERVER (app.py) --------------------
+// This section assumes the code in untitled2.txt continued with the Python server logic.
+// The provided code is a single file combining Dart and Python.
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from datetime import datetime, timedelta
-import threading
-import time
-import uuid
 import os
+import time
+import threading
+from datetime import datetime, timedelta
+from functools import wraps
+from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy.dialects.postgresql import JSONB
 from werkzeug.security import generate_password_hash, check_password_hash
-import logging
-from sqlalchemy import event, DDL
+import jwt # PyJWT
+import secrets # For generating tokens
 
-# -------------------- LOGGING SETUP --------------------
-# Set up basic logging to see errors in the console
-logging.basicConfig(level=logging.INFO)
-
-# -------------------- APP & DB SETUP --------------------
 app = Flask(__name__)
-CORS(app)
 
-# NOTE: Replace with your actual connection string if deploying
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-    'DATABASE_URL',
-    'postgresql://onechat_nhc9_user:JoXwS5h0cfjKLYVV0XMeaXsqhgWBKxjm@dpg-d3efbpggjchc738litc0-a/onechat_nhc9'
-)
+# --- CONFIGURATION ---
+# Database URI for SQLAlchemy (e.g., PostgreSQL or SQLite for Render)
+# Using os.environ.get is crucial for Render deployment
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://onechat_nhc9_user:JoXwS5h0cfjKLYVV0XMeaXsqhgWBKxjm@dpg-d3efbpggjchc738litc0-a/onechat_nhc9')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Secret key for JWT and session management
+app.config['SECRET_KEY'] = 'a-super-secret-key-that-should-be-in-env-variables' # Use os.environ.get in production
 
 db = SQLAlchemy(app)
 
-# -------------------- DATABASE MODELS --------------------
+# --- MODELS ---
+
+# Association table for Group and User (Many-to-Many relationship)
+group_members = db.Table('group_members',
+    db.Column('group_id', db.Integer, db.ForeignKey('group.id'), primary_key=True),
+    db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True)
+)
+
 class User(db.Model):
-    __tablename__ = 'users'
-    username = db.Column(db.String(50), primary_key=True)
-    password = db.Column(db.String(200), nullable=False)  # hashed
-    name = db.Column(db.String(100), nullable=False)
-    groups = db.Column(JSONB, default=list)
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    name = db.Column(db.String(100), nullable=True) # Display name
+    token = db.Column(db.String(200), unique=True, nullable=True)
+    token_expiry = db.Column(db.DateTime, nullable=True)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+    
+    def to_dict(self):
+        return {
+            'username': self.username,
+            'name': self.name or self.username,
+        }
 
 class Group(db.Model):
-    __tablename__ = 'groups'
-    group_number = db.Column(db.String(50), primary_key=True)
+    id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    members = db.Column(JSONB, default=list)
-    creator = db.Column(db.String(50), db.ForeignKey('users.username'), nullable=False) 
+    number = db.Column(db.String(50), unique=True, nullable=False) # The unique ID used by the client
+    creator = db.Column(db.String(80), nullable=False) # Username of the creator
+    
+    members = db.relationship('User', secondary=group_members, lazy='subquery',
+                              backref=db.backref('groups', lazy=True))
+
+    def to_dict(self, current_user_username):
+        return {
+            'name': self.name,
+            'number': self.number,
+            'creator': self.creator,
+            'is_creator': self.creator == current_user_username,
+            'member_count': len(self.members)
+        }
 
 class Message(db.Model):
-    __tablename__ = 'messages'
     id = db.Column(db.Integer, primary_key=True)
-    group_number = db.Column(db.String(50), db.ForeignKey('groups.group_number'), nullable=False)
-    sender = db.Column(db.String(50), db.ForeignKey('users.username'), nullable=False)
+    group_number = db.Column(db.String(50), db.ForeignKey('group.number'), nullable=False)
+    sender = db.Column(db.String(80), db.ForeignKey('user.username'), nullable=False)
     message = db.Column(db.Text, nullable=False)
-    # ⚠️ IMPORTANT: time is stored as UTC and used for sync filtering
-    time = db.Column(db.DateTime, nullable=False, default=datetime.utcnow) 
+    time = db.Column(db.DateTime, default=datetime.utcnow) # Server time stamp
 
-class Session(db.Model):
-    __tablename__ = 'sessions'
-    username = db.Column(db.String(50), primary_key=True, unique=True)
-    token = db.Column(db.String(200), nullable=False)
+    def to_dict(self):
+        return {
+            'sender': self.sender,
+            'message': self.message,
+            'time': self.time.isoformat() + 'Z' # UTC ISO format with Z
+        }
 
-# -------------------- INDEX CREATION (for performance) --------------------
-# This ensures that querying messages by group_number and time is fast
-# which is essential for the new sync logic.
-index_ddl = DDL('CREATE INDEX idx_messages_group_time ON messages (group_number, time)')
-event.listen(Message.__table__, 'after_create', index_ddl.execute_if(dialect='postgresql'))
+# --- DECORATORS ---
 
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        data = request.get_json()
+        if data and 'token' in data:
+            token = data['token']
 
-# -------------------- AUTH HELPERS --------------------
-def generate_token():
-    return str(uuid.uuid4())
+        if not token:
+            return jsonify({'success': False, 'message': 'Token is missing!'}), 401
 
-def authenticate(token):
-    if not token:
-        return None
-    session = Session.query.filter_by(token=token).first()
-    return session.username if session else None
+        try:
+            # Check if token is in the database and not expired
+            current_user = User.query.filter_by(token=token).first()
+            if not current_user or current_user.token_expiry < datetime.utcnow():
+                 return jsonify({'success': False, 'message': 'Token is invalid or expired!'}), 401
+        except:
+            return jsonify({'success': False, 'message': 'Token is invalid or expired!'}), 401
+        
+        return f(current_user, *args, **kwargs)
 
-# -------------------- DATABASE CREATION --------------------
-with app.app_context():
-    # This will create tables if they don't exist
-    db.create_all() 
+    return decorated
 
-# -------------------- ROOT --------------------
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({
-        "success": True,
-        "message": "🚀 OneChat API is running! Database connection active."
-    })
+# --- SETUP ROUTE (Run once to create DB tables) ---
+@app.before_first_request
+def create_tables():
+    db.create_all()
 
-# -------------------- SIGNUP --------------------
-@app.route("/signup", methods=["POST"])
+# --- AUTH ROUTES ---
+
+@app.route('/signup', methods=['POST'])
 def signup():
-    data = request.get_json() or {}
-    username = data.get("username")
-    password = data.get("password")
-    name = data.get("name", username)
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    name = data.get('name')
 
     if not username or not password or not name:
-        return jsonify({"success": False, "message": "Missing fields!"}), 400
-    
+        return jsonify({'success': False, 'message': 'Missing fields!'}), 400
+
     if len(password) < 6:
-        return jsonify({"success": False, "message": "Password must be at least 6 characters long."}), 400
+        return jsonify({'success': False, 'message': 'Password must be at least 6 characters.'}), 400
 
-    if User.query.get(username):
-        return jsonify({"success": False, "message": "Username already exists!"}), 400
+    if User.query.filter_by(username=username).first():
+        return jsonify({'success': False, 'message': 'Username already exists.'}), 409
 
-    hashed = generate_password_hash(password)
-    new_user = User(username=username, password=hashed, name=name, groups=[])
-    db.session.add(new_user)
-    db.session.commit()
-    return jsonify({"success": True, "message": "Signup successful!"})
+    new_user = User(username=username, name=name)
+    new_user.set_password(password)
 
-# -------------------- LOGIN --------------------
-@app.route("/login", methods=["POST"])
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'User created successfully!'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
+
+@app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json() or {}
-    username = data.get("username")
-    password = data.get("password")
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
 
-    if not username or not password:
-        return jsonify({"success": False, "message": "Missing fields!"}), 400
+    user = User.query.filter_by(username=username).first()
 
-    user = User.query.get(username)
-    if user and check_password_hash(user.password, password):
-        token = generate_token()
-        session = Session.query.get(username)
-        if session:
-            session.token = token
-        else:
-            new_session = Session(username=username, token=token)
-            db.session.add(new_session)
+    if user and user.check_password(password):
+        # Generate a new secure token (e.g., a long random string)
+        token = secrets.token_urlsafe(32)
+        expiry = datetime.utcnow() + timedelta(hours=24) # Token expires in 24 hours
+
+        user.token = token
+        user.token_expiry = expiry
         db.session.commit()
-        return jsonify({"success": True, "message": "Login successful!", "token": token})
-    else:
-        return jsonify({"success": False, "message": "Invalid credentials!"}), 401
 
-# -------------------- LOGOUT --------------------
-@app.route("/logout", methods=["POST"])
-def logout():
-    data = request.get_json() or {}
-    token = data.get("token")
-    if not token:
-        return jsonify({"success": False, "message": "Missing token!"}), 400
+        return jsonify({'success': True, 'message': 'Login successful!', 'token': token})
+    
+    return jsonify({'success': False, 'message': 'Invalid username or password!'}), 401
 
-    session = Session.query.filter_by(token=token).first()
-    if not session:
-        return jsonify({"success": False, "message": "Invalid token!"}), 401
-
-    db.session.delete(session)
+@app.route('/logout', methods=['POST'])
+@token_required
+def logout(current_user):
+    # Invalidate the token
+    current_user.token = None
+    current_user.token_expiry = None
     db.session.commit()
-    return jsonify({"success": True, "message": "Logout successful!"})
+    return jsonify({'success': True, 'message': 'Logged out successfully!'})
 
-# -------------------- CREATE GROUP --------------------
-@app.route("/create_group", methods=["POST"])
-def create_group():
-    data = request.get_json() or {}
-    token = data.get("token")
-    group_name = data.get("groupName")
-    group_number = data.get("groupNumber")
+# --- PROFILE ROUTES ---
 
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
-    if not group_name or not group_number:
-        return jsonify({"success": False, "message": "Missing fields!"}), 400
-
-    if Group.query.get(group_number):
-        return jsonify({"success": False, "message": "Group number already exists!"}), 400
-
-    new_group = Group(group_number=group_number, name=group_name, members=[user], creator=user)
-    db.session.add(new_group)
-
-    user_obj = User.query.get(user)
-    if user_obj and group_number not in (user_obj.groups or []):
-        user_obj.groups = (user_obj.groups or []) + [group_number]
-
-    db.session.commit()
-    return jsonify({"success": True, "message": f"Group '{group_name}' created successfully!"})
-
-# -------------------- JOIN GROUP --------------------
-@app.route("/join_group", methods=["POST"])
-def join_group():
-    data = request.get_json() or {}
-    token = data.get("token")
-    group_number = data.get("groupNumber")
-
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
-    if not group_number:
-        return jsonify({"success": False, "message": "Missing group number!"}), 400
-
-    group = Group.query.get(group_number)
-    if not group:
-        return jsonify({"success": False, "message": "Group not found!"}), 404
-
-    if user not in (group.members or []):
-        group.members = (group.members or []) + [user]
-
-    user_obj = User.query.get(user)
-    if user_obj and group_number not in (user_obj.groups or []):
-        user_obj.groups = (user_obj.groups or []) + [group_number]
-
-    db.session.commit()
-    return jsonify({"success": True, "message": f"Joined group '{group.name}' successfully!"})
-
-# -------------------- LEAVE GROUP --------------------
-@app.route("/leave_group", methods=["POST"])
-def leave_group():
-    data = request.get_json() or {}
-    token = data.get("token")
-    group_number = data.get("groupNumber")
-
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
-    group = Group.query.get(group_number)
-    user_obj = User.query.get(user)
-
-    if not group or not user_obj:
-        return jsonify({"success": False, "message": "Group or User not found!"}), 404
-
-    # Remove user from group members
-    if user in (group.members or []):
-        group.members.remove(user)
-
-    # Remove group from user's groups list
-    if group_number in (user_obj.groups or []):
-        user_obj.groups.remove(group_number)
-
-    # Check if the user was the creator and if the group is now empty
-    if group.creator == user:
-        if not group.members:
-            # If creator leaves and no one is left, delete the group
-            Message.query.filter_by(group_number=group_number).delete()
-            db.session.delete(group)
-            db.session.commit()
-            return jsonify({"success": True, "message": "Group left and deleted (group was empty)!"})
-        else:
-            # If creator leaves and others are left, assign a new creator
-            group.creator = group.members[0] # Assign first member as new creator
-            db.session.commit()
-            return jsonify({"success": True, "message": f"Group left. New admin: {group.creator}"})
-    else:
-        db.session.commit()
-        return jsonify({"success": True, "message": "Group left successfully!"})
-
-# -------------------- DELETE GROUP --------------------
-@app.route("/delete_group", methods=["POST"])
-def delete_group():
-    data = request.get_json() or {}
-    token = data.get("token")
-    group_number = data.get("groupNumber")
-
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
-    group = Group.query.get(group_number)
-    if not group:
-        return jsonify({"success": False, "message": "Group not found!"}), 404
-
-    # Authorization Check: Only the creator can delete the group
-    if group.creator != user:
-        return jsonify({"success": False, "message": "Only the group admin can delete the group!"}), 403
-
-    # Remove group from all members' group lists
-    for member_username in (group.members or []):
-        member = User.query.get(member_username)
-        if member and group_number in (member.groups or []):
-            member.groups.remove(group_number)
-
-    # Delete all messages in the group
-    Message.query.filter_by(group_number=group_number).delete()
-
-    # Delete the group itself
-    db.session.delete(group)
-    db.session.commit()
-    return jsonify({"success": True, "message": f"Group '{group.name}' and all messages deleted successfully!"})
-
-
-# -------------------- GET PROFILE --------------------
-@app.route("/profile", methods=["POST"])
-def get_profile():
-    data = request.get_json() or {}
-    token = data.get("token")
-
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
-    user_obj = User.query.get(user)
-    user_groups = []
-    if user_obj:
-        for gnum in (user_obj.groups or []):
-            grp = Group.query.get(gnum)
-            if grp:
-                is_creator = grp.creator == user
-                user_groups.append({"name": grp.name, "number": gnum, "is_creator": is_creator})
-
+@app.route('/profile', methods=['POST'])
+@token_required
+def get_profile(current_user):
+    # Fetch all groups the user is a member of
+    user_groups = current_user.groups
+    
+    groups_data = [group.to_dict(current_user.username) for group in user_groups]
+    
     return jsonify({
-        "success": True,
-        "username": user,
-        "name": user_obj.name if user_obj else "",
-        "groups": user_groups
+        'success': True,
+        'username': current_user.username,
+        'name': current_user.name or current_user.username,
+        'groups': groups_data
     })
 
-# -------------------- UPDATE PROFILE --------------------
-@app.route("/update_profile", methods=["POST"])
-def update_profile():
-    data = request.get_json() or {}
-    token = data.get("token")
-    new_name = data.get("newName")
-
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
-    user_obj = User.query.get(user)
-    if user_obj:
-        user_obj.name = new_name or user_obj.name
-        db.session.commit()
-
-    return jsonify({"success": True, "message": "Profile updated successfully!"})
-
-# -------------------- SEND MESSAGE --------------------
-@app.route("/send_message", methods=["POST"])
-def send_message():
-    data = request.get_json() or {}
-    token = data.get("token")
-    group_number = data.get("groupNumber")
-    text = data.get("message")
-
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
-
-    if not Group.query.get(group_number):
-        return jsonify({"success": False, "message": "Group not found!"}), 404
+@app.route('/update_profile', methods=['POST'])
+@token_required
+def update_profile(current_user):
+    data = request.get_json()
+    new_name = data.get('newName')
     
-    if not text:
-        return jsonify({"success": False, "message": "Message cannot be empty!"}), 400
+    if not new_name:
+        return jsonify({'success': False, 'message': 'Display name cannot be empty.'}), 400
 
+    try:
+        current_user.name = new_name
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'Profile updated successfully!'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
+
+
+# --- GROUP MANAGEMENT ROUTES ---
+
+@app.route('/create_group', methods=['POST'])
+@token_required
+def create_group(current_user):
+    data = request.get_json()
+    group_name = data.get('groupName')
+    group_number = data.get('groupNumber')
+    
+    if not group_name or not group_number:
+        return jsonify({'success': False, 'message': 'Missing group name or ID.'}), 400
+
+    if Group.query.filter_by(number=group_number).first():
+        return jsonify({'success': False, 'message': f'Group ID "{group_number}" already taken.'}), 409
+    
+    new_group = Group(name=group_name, number=group_number, creator=current_user.username)
+    new_group.members.append(current_user)
+
+    try:
+        db.session.add(new_group)
+        db.session.commit()
+        return jsonify({'success': True, 'message': f'Group "{group_name}" created successfully!'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
+
+@app.route('/join_group', methods=['POST'])
+@token_required
+def join_group(current_user):
+    data = request.get_json()
+    group_number = data.get('groupNumber')
+    
+    group = Group.query.filter_by(number=group_number).first()
+    if not group:
+        return jsonify({'success': False, 'message': 'Group not found.'}), 404
+        
+    if current_user in group.members:
+        return jsonify({'success': False, 'message': 'You are already a member of this group.'}), 400
+
+    try:
+        group.members.append(current_user)
+        db.session.commit()
+        return jsonify({'success': True, 'message': f'Successfully joined group {group.name}.'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
+
+@app.route('/leave_group', methods=['POST'])
+@token_required
+def leave_group(current_user):
+    data = request.get_json()
+    group_number = data.get('groupNumber')
+    
+    group = Group.query.filter_by(number=group_number).first()
+    if not group:
+        return jsonify({'success': False, 'message': 'Group not found.'}), 404
+
+    # 🌟 FIX (2/2): Prevent the creator from leaving; they must delete the group
+    if group.creator == current_user.username:
+        return jsonify({'success': False, 'message': 'As the group creator, you must delete the group instead of leaving it.'}), 403
+        
+    # Remove the user from the group's members list
+    if current_user in group.members:
+        try:
+            group.members.remove(current_user)
+            db.session.commit()
+            return jsonify({'success': True, 'message': f'Successfully left group {group.name}.'})
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
+    else:
+        return jsonify({'success': False, 'message': 'You are not a member of this group.'}), 400
+
+@app.route('/delete_group', methods=['POST'])
+@token_required
+def delete_group(current_user):
+    data = request.get_json()
+    group_number = data.get('groupNumber')
+    
+    group = Group.query.filter_by(number=group_number).first()
+    if not group:
+        return jsonify({'success': False, 'message': 'Group not found.'}), 404
+        
+    if group.creator != current_user.username:
+        return jsonify({'success': False, 'message': 'Only the group creator can delete the group.'}), 403
+
+    try:
+        # Delete all messages associated with the group
+        Message.query.filter_by(group_number=group_number).delete(synchronize_session='fetch')
+        # Delete the group itself (group_members association table handles cascade implicitly)
+        db.session.delete(group)
+        db.session.commit()
+        return jsonify({'success': True, 'message': f'Group "{group.name}" successfully deleted.'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
+
+
+# --- MESSAGE ROUTES ---
+
+@app.route('/send_message', methods=['POST'])
+@token_required
+def send_message(current_user):
+    data = request.get_json()
+    group_number = data.get('groupNumber')
+    message_content = data.get('message')
+
+    group = Group.query.filter_by(number=group_number).first()
+    if not group or current_user not in group.members:
+        return jsonify({'success': False, 'message': 'Group not found or you are not a member.'}), 404
 
     new_message = Message(
-        sender=user,
-        message=text,
         group_number=group_number,
-        time=datetime.utcnow() # Use UTC for consistent syncing
+        sender=current_user.username,
+        message=message_content,
+        time=datetime.utcnow() # Use the server's UTC time
     )
-    db.session.add(new_message)
-    db.session.commit()
-    # Return the exact server-generated time for better client sync confirmation
-    return jsonify({
-        "success": True, 
-        "message": "Message sent!",
-        "time": new_message.time.isoformat()
-    })
-
-# -------------------- GET MESSAGES (SYNC ENDPOINT) --------------------
-@app.route("/get_messages/<group_number>", methods=["POST"])
-def get_messages(group_number):
-    data = request.get_json() or {}
-    token = data.get("token")
-    # 🌟 NEW: Retrieve the optional last_synced_time from the client
-    last_synced_time = data.get("last_synced_time") 
-
-    user = authenticate(token)
-    if not user:
-        return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
-    # Base query: filter by group number
+    try:
+        db.session.add(new_message)
+        db.session.commit()
+        # Return the definitive server time for the client to update its local copy
+        return jsonify({'success': True, 'message': 'Message sent.', 'time': new_message.time.isoformat() + 'Z'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
+
+
+@app.route('/get_messages/<group_number>', methods=['POST'])
+@token_required
+def get_messages(current_user, group_number):
+    data = request.get_json()
+    last_synced_time_str = data.get('last_synced_time')
+
+    group = Group.query.filter_by(number=group_number).first()
+    if not group or current_user not in group.members:
+        return jsonify({'success': False, 'message': 'Group not found or you are not a member.'}), 404
+
+    # Base query: get all messages for this group
     query = Message.query.filter_by(group_number=group_number)
     
-    # 🌟 IMPLEMENT INCREMENTAL SYNC
-    if last_synced_time:
+    # Filter by time if the client provides a last synced time
+    if last_synced_time_str:
         try:
-            # Parse the ISO 8601 string received from the client
-            last_time = datetime.fromisoformat(last_synced_time.replace('Z', '+00:00'))
+            # Parse the client's last synced time (it should be ISO format UTC)
+            last_synced_time = datetime.fromisoformat(last_synced_time_str.replace('Z', '+00:00'))
             
-            # Filter messages where the server time is strictly GREATER than the client's last time
-            # This is the core of the incremental sync.
-            query = query.filter(Message.time > last_time)
-            
-            app.logger.info(f"Syncing group {group_number} for {user} since {last_synced_time}")
-            
+            # Filter for messages *strictly newer* than the last synced time
+            query = query.filter(Message.time > last_synced_time)
         except ValueError:
-            # If the timestamp is invalid, log it and proceed to return ALL messages (or just the latest)
-            app.logger.warning(f"Invalid last_synced_time received: {last_synced_time}. Returning all messages.")
-            # We proceed with the base query (all messages) if the time filter fails
-            
+            # If time string is invalid, ignore the filter and send all available messages
+            pass 
 
-    # Apply ordering and execute
-    # Note: If last_synced_time was valid, this only returns NEW messages.
-    # If not, it returns all messages for the group (acting as a full refresh).
-    group_messages = query.order_by(Message.time.asc()).all()
-
+    # Order by time and fetch
+    messages = query.order_by(Message.time.asc()).limit(100).all() # Limit for performance
+    
     return jsonify({
-        "success": True,
-        "messages": [
-            {"sender": m.sender, "message": m.message, "time": m.time.isoformat()}
-            for m in group_messages
-        ]
+        'success': True,
+        'messages': [message.to_dict() for message in messages]
     })
+
 
 # -------------------- MESSAGE CLEANUP --------------------
 def cleanup_messages():
@@ -438,3 +402,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000)) 
     # Note: Set debug=False in production
     app.run(host="0.0.0.0", port=port, debug=True)
+
