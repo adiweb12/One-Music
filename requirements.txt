@@ -4,4 +4,5 @@ Flask-SQLAlchemy==3.1.1
 SQLAlchemy==2.0.35
 psycopg2-binary==2.9.9
 Werkzeug==3.0.4
+PyJWT==2.9.0
 gunicorn==22.0.0
