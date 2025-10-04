@@ -16,7 +16,7 @@ CORS(app)
 # NOTE: Replace with your actual connection string if deploying
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
     'DATABASE_URL',
-    'postgresql://onechat_nhc9_user:JoXwS5h0cfjKLYVV0XMeaXsqhgWBKxjm@dpg-d3efbpggjchc738litc0-a/onechat_nhc9'
+    'postgresql://test_qdts_user:J7bmMeuoi6tLFi7pIQdGwsWhlJlT3NFU@dpg-d3gj0lh5pdvs73eic5b0-a/test_qdts'
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
