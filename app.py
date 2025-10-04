@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 CORS(app)
 
+# 🌟 IMPORTANT: Replace with your actual database URL
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
     'DATABASE_URL',
     'postgresql://onechat_nhc9_user:JoXwS5h0cfjKLYVV0XMeaXsqhgWBKxjm@dpg-d3efbpggjchc738litc0-a/onechat_nhc9'
@@ -32,17 +33,15 @@ db = SQLAlchemy(app)
 class User(db.Model):
     __tablename__ = 'users'
     username = db.Column(db.String(50), primary_key=True)
-    password = db.Column(db.String(200), nullable=False)  # hashed
+    password = db.Column(db.String(200), nullable=False)
     name = db.Column(db.String(100), nullable=False)
     groups = db.Column(JSONB, default=list)
 
-# 🌟 NEW: Track last read time for unread count
 class GroupStatus(db.Model):
     __tablename__ = 'group_status'
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(50), db.ForeignKey('users.username'), nullable=False)
     group_number = db.Column(db.String(50), db.ForeignKey('groups.group_number'), nullable=False)
-    # The time of the last message the user read
     last_read_time = db.Column(db.DateTime, nullable=False, default=datetime.fromtimestamp(0).replace(tzinfo=None))
     
     __table_args__ = (
@@ -101,16 +100,12 @@ def get_group_metadata(user, group_number):
         
     is_creator = grp.creator == user
     
-    # 1. Get the user's last read time for this group
     status = GroupStatus.query.filter_by(username=user, group_number=group_number).first()
-    # Default to the UNIX epoch if no status exists
     last_read_time = status.last_read_time if status else datetime.fromtimestamp(0).replace(tzinfo=None)
 
-    # 2. Get the last message time
     last_message = Message.query.filter_by(group_number=group_number).order_by(Message.time.desc()).first()
     last_message_time = last_message.time if last_message else None
 
-    # 3. Calculate unread count (messages WHERE time > last_read_time)
     if last_message_time and last_message_time > last_read_time:
         unread_count = Message.query.filter(
             Message.group_number == group_number,
@@ -137,7 +132,6 @@ def home():
 
 @app.route("/signup", methods=["POST"])
 def signup():
-    # ... (Signup logic from original) ...
     data = request.get_json() or {}
     username = data.get("username")
     password = data.get("password")
@@ -160,7 +154,6 @@ def signup():
 
 @app.route("/login", methods=["POST"])
 def login():
-    # ... (Login logic from original) ...
     data = request.get_json() or {}
     username = data.get("username")
     password = data.get("password")
@@ -184,7 +177,6 @@ def login():
 
 @app.route("/logout", methods=["POST"])
 def logout():
-    # ... (Logout logic from original) ...
     data = request.get_json() or {}
     token = data.get("token")
     if not token:
@@ -223,7 +215,6 @@ def create_group():
     if user_obj and group_number not in (user_obj.groups or []):
         user_obj.groups = (user_obj.groups or []) + [group_number]
         
-    # Initialize GroupStatus for the creator
     new_status = GroupStatus(username=user, group_number=group_number)
     db.session.add(new_status)
 
@@ -255,14 +246,13 @@ def join_group():
     if user_obj and group_number not in (user_obj.groups or []):
         user_obj.groups = (user_obj.groups or []) + [group_number]
 
-    # Initialize GroupStatus for the joining user
     new_status = GroupStatus(username=user, group_number=group_number)
     db.session.add(new_status)
         
     db.session.commit()
     return jsonify({"success": True, "message": f"Joined group '{group.name}' successfully!"})
 
-# -------------------- LEAVE GROUP --------------------
+# -------------------- LEAVE GROUP (FIXED) --------------------
 @app.route("/leave_group", methods=["POST"])
 def leave_group():
     data = request.get_json() or {}
@@ -278,37 +268,40 @@ def leave_group():
 
     if not group or not user_obj:
         return jsonify({"success": False, "message": "Group or User not found!"}), 404
-
-    # Remove user from group members
+        
+    # 1. Remove user from group members
     if user in (group.members or []):
         group.members.remove(user)
 
-    # Remove group from user's groups list
+    # 2. Remove group from user's groups list
     if group_number in (user_obj.groups or []):
         user_obj.groups.remove(group_number)
         
-    # 🌟 NEW: Delete GroupStatus for the user
+    # 3. Delete GroupStatus for the user
     GroupStatus.query.filter_by(username=user, group_number=group_number).delete()
 
-    # Check if the user was the creator and if the group is now empty
+    db.session.flush() # Ensure changes are tracked before checking current state
+
+    # 4. Handle Creator/Admin role and group deletion logic
     if group.creator == user:
         if not group.members:
-            # If creator leaves and no one is left, delete the group
+            # Creator leaves and no one is left: DELETE THE ENTIRE GROUP
             Message.query.filter_by(group_number=group_number).delete()
-            GroupStatus.query.filter_by(group_number=group_number).delete() # Delete all statuses
+            GroupStatus.query.filter_by(group_number=group_number).delete() 
             db.session.delete(group)
             db.session.commit()
             return jsonify({"success": True, "message": "Group left and deleted (group was empty)!"})
         else:
-            # If creator leaves and others are left, assign a new creator
-            group.creator = group.members[0] # Assign first member as new creator
+            # Creator leaves, others are left: Assign a new creator
+            group.creator = group.members[0] # Assign first remaining member as new creator
             db.session.commit()
             return jsonify({"success": True, "message": f"Group left. New admin: {group.creator}"})
     else:
-        db.session.commit()
+        # Standard member leaving: Commit the removals
+        db.session.commit() 
         return jsonify({"success": True, "message": "Group left successfully!"})
 
-# -------------------- DELETE GROUP --------------------
+# -------------------- DELETE GROUP (FIXED) --------------------
 @app.route("/delete_group", methods=["POST"])
 def delete_group():
     data = request.get_json() or {}
@@ -326,22 +319,22 @@ def delete_group():
     if group.creator != user:
         return jsonify({"success": False, "message": "Only the group admin can delete the group!"}), 403
 
-    # Remove group from all members' group lists
+    # 1. Remove group from all members' group lists
     for member_username in (group.members or []):
         member = User.query.get(member_username)
         if member and group_number in (member.groups or []):
             member.groups.remove(group_number)
 
-    # Delete all messages and statuses
+    # 2. Delete all related data
     Message.query.filter_by(group_number=group_number).delete()
     GroupStatus.query.filter_by(group_number=group_number).delete()
 
-    # Delete the group itself
+    # 3. Delete the group itself
     db.session.delete(group)
     db.session.commit()
     return jsonify({"success": True, "message": f"Group '{group.name}' and all messages deleted successfully!"})
 
-# -------------------- GET PROFILE AND GROUPS (MODIFIED) --------------------
+# -------------------- GET PROFILE AND GROUPS (Unchanged) --------------------
 @app.route("/profile_and_groups", methods=["POST"])
 def get_profile_and_groups():
     data = request.get_json() or {}
@@ -415,7 +408,7 @@ def send_message():
     db.session.add(new_message)
     db.session.commit()
     
-    # 🌟 NEW: Mark group as read on successful send 
+    # Mark group as read on successful send 
     status = GroupStatus.query.filter_by(username=user, group_number=group_number).first()
     if status:
         status.last_read_time = new_message.time
@@ -427,7 +420,7 @@ def send_message():
         "time": new_message.time.isoformat()
     })
 
-# -------------------- MARK READ (NEW ENDPOINT) --------------------
+# -------------------- MARK READ (Unchanged) --------------------
 @app.route("/mark_read", methods=["POST"])
 def mark_read():
     data = request.get_json() or {}
@@ -438,21 +431,16 @@ def mark_read():
     if not user:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
-    # Get the latest message time in the group
     latest_message = Message.query.filter_by(group_number=group_number).order_by(Message.time.desc()).first()
     
     if not latest_message:
-        # If no messages exist, we mark as the earliest possible time
         read_time = datetime.fromtimestamp(0).replace(tzinfo=None)
     else:
-        # Mark as read up to the time of the latest message
         read_time = latest_message.time
 
-    # Update the GroupStatus entry
     status = GroupStatus.query.filter_by(username=user, group_number=group_number).first()
     
     if not status:
-        # This shouldn't happen if user is a member, but handle it by creating a new status
         status = GroupStatus(username=user, group_number=group_number, last_read_time=read_time)
         db.session.add(status)
     else:
@@ -462,7 +450,7 @@ def mark_read():
     return jsonify({"success": True, "message": "Group marked as read."})
 
 
-# -------------------- GET MESSAGES (SYNC ENDPOINT - Unchanged logic) --------------------
+# -------------------- GET MESSAGES (Unchanged) --------------------
 @app.route("/get_messages/<group_number>", methods=["POST"])
 def get_messages(group_number):
     data = request.get_json() or {}
@@ -473,30 +461,20 @@ def get_messages(group_number):
     if not user:
         return jsonify({"success": False, "message": "Unauthorized!"}), 401
     
-    # Check if the user is a member of the group
     group = Group.query.get(group_number)
     if not group or user not in (group.members or []):
         return jsonify({"success": False, "message": "Group not found or you are not a member!"}), 404
     
-    # Base query: filter by group number
     query = Message.query.filter_by(group_number=group_number)
     
-    # IMPLEMENT INCREMENTAL SYNC
     if last_synced_time:
         try:
-            # Parse the ISO 8601 string received from the client
             last_time = datetime.fromisoformat(last_synced_time.replace('Z', '+00:00'))
-            
-            # Filter messages where the server time is strictly GREATER than the client's last time
             query = query.filter(Message.time > last_time)
-            app.logger.info(f"Syncing group {group_number} for {user} since {last_synced_time}")
-            
         except ValueError:
-            # If the timestamp is invalid, log it and return *all* messages
             app.logger.warning(f"Invalid last_synced_time received: {last_synced_time}. Returning all messages.")
             
 
-    # Apply ordering and execute
     group_messages = query.order_by(Message.time.asc()).all()
 
     return jsonify({
@@ -517,9 +495,7 @@ def cleanup_messages():
                 now = datetime.utcnow()
                 cutoff_time = now - timedelta(hours=RETENTION_HOURS)
                 
-                # Delete messages older than the cutoff
                 deleted_msg = Message.query.filter(Message.time < cutoff_time).delete(synchronize_session='fetch')
-                # Also clean up GroupStatus entries for non-existent groups just in case
                 active_group_numbers = [g.group_number for g in Group.query.with_entities(Group.group_number).all()]
                 deleted_status = GroupStatus.query.filter(GroupStatus.group_number.notin_(active_group_numbers)).delete(synchronize_session='fetch')
                 
