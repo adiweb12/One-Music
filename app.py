@@ -1,17 +1,16 @@
 import os
 import jwt
 import datetime
-import json
 from functools import wraps
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
-from flask_socketio import SocketIO, join_room, leave_room, emit
+from flask_socketio import SocketIO, join_room, emit
 from flask_bcrypt import Bcrypt
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
 # --- Flask App Initialization & Configuration ---
@@ -20,13 +19,14 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-if app.config['SQLALCHEMY_DATABASE_URI'].startswith("postgres://"):
-    # SQLAlchemy requires postgresql://
+# Adjust URI for SQLAlchemy compatibility
+if app.config['SQLALCHEMY_DATABASE_URI'] and app.config['SQLALCHEMY_DATABASE_URI'].startswith("postgres://"):
     app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace("postgres://", "postgresql://", 1)
 
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
+# Use 'threading' for Render's default server environment
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading') 
 
 # --- Constants ---
@@ -37,33 +37,33 @@ TOKEN_EXPIRATION_DAYS = 7
 #                 DATABASE MODELS (SQLAlchemy)
 # =========================================================
 
-# User Model (Handles user registration and authentication)
 class User(db.Model):
     __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
+    # PostgreSQL primary key (auto-incrementing integer)
+    id = db.Column(db.Integer, primary_key=True) 
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(128), nullable=False)
     name = db.Column(db.String(120), nullable=False)
-    # Stores a list of group numbers the user belongs to
+    # Stores a list of group numbers (strings)
     groups = db.Column(ARRAY(db.String), default=[]) 
 
-# Group Model (Handles chat groups and message history)
 class Group(db.Model):
     __tablename__ = 'groups'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
-    # Unique number/identifier for joining/messaging
     number = db.Column(db.String(80), unique=True, nullable=False)
-    creator_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    # Stores a list of user IDs (integers) who are members
+    # Foreign key to User.id (integer)
+    creator_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False) 
+    # Stores a list of member IDs (integers)
     members = db.Column(ARRAY(db.Integer), default=[])
-    # Stores message history as a JSON array of objects (using JSONB for efficiency)
+    # Stores message history as a JSON array
     messages = db.Column(JSONB, default=[]) 
 
-@app.before_first_request
+# --- Database Initialization Function ---
 def create_tables():
-    """Create database tables if they don't exist."""
-    db.create_all()
+    """Create database tables if they don't exist. Called during startup."""
+    with app.app_context():
+        db.create_all()
 
 
 # =========================================================
@@ -156,6 +156,7 @@ def login():
 @app.route('/logout', methods=['POST'])
 @auth_required
 def logout(user_id):
+    # JWT logout is client-side, this confirms token validity
     return jsonify({"success": True, "message": "Logged out successfully"}), 200
 
 @app.route('/profile', methods=['POST'])
@@ -230,7 +231,8 @@ def create_group(user_id):
     # Add group number to user's list
     user = User.query.get(user_id)
     if user:
-        user.groups.append(group_number)
+        # Appends to the Postgres ARRAY type
+        user.groups.append(group_number) 
         db.session.commit()
         
     return jsonify({"success": True, "message": f"Group '{group_name}' created successfully"}), 201
@@ -251,10 +253,10 @@ def join_group(user_id):
     if user_id in group.members:
         return jsonify({"success": False, "message": "Already a member of this group"}), 400
 
-    # Add user to group's member list
+    # Add user to group's member list (Postgres ARRAY append)
     group.members.append(user_id)
     
-    # Add group to user's groups list
+    # Add group to user's groups list (Postgres ARRAY append)
     user = User.query.get(user_id)
     if user:
         user.groups.append(group_number)
@@ -266,6 +268,7 @@ def join_group(user_id):
 @auth_required
 def get_messages(user_id, group_number):
     group = Group.query.filter_by(number=group_number).first()
+    
     if not group or user_id not in group.members:
         return jsonify({"success": False, "message": "Not authorized to view this chat"}), 403
 
@@ -295,12 +298,12 @@ def get_messages(user_id, group_number):
 #                 SOCKETIO EVENTS (Real-Time)
 # =========================================================
 
-user_session = {} # Socket SID -> user data
+user_session = {} # Maps Socket SID to user data
 
-# --- SOCKET AUTHENTICATION ---
 @socketio.on('connect')
 def handle_connect():
     token = request.headers.get('token')
+    
     if not token:
         print("Socket connection rejected: No token")
         return False
@@ -312,13 +315,10 @@ def handle_connect():
         username, name = get_user_details(user_id)
         
         if not username:
-             print(f"Socket connection rejected: User not found for ID {user_id}")
              return False
 
         user_session[request.sid] = {
             'user_id': user_id,
-            'username': username,
-            'name': name,
             'display_name': name if name else username
         }
         print(f"Client connected: {user_session[request.sid]['display_name']} (SID: {request.sid})")
@@ -347,6 +347,7 @@ def on_join(data):
     user_id = session_data['user_id']
     group = Group.query.filter_by(number=group_number).first()
     
+    # Security check
     if group and user_id in group.members:
         join_room(group_number)
         print(f"{session_data['display_name']} joined room: {group_number}")
@@ -381,12 +382,9 @@ def handle_message(data):
         "timestamp": timestamp
     }
 
-    # 2. Save message to PostgreSQL group history (Append to JSONB array)
-    
-    # We load the existing messages, append the new one, and save the full array.
-    # This is less performant than a native array append, but SQLAlchemy array field
-    # handling requires this pattern or raw SQL which is more complex.
-    updated_messages = group.messages
+    # 2. Save message to PostgreSQL group history (Appending to JSONB)
+    # NOTE: This loads the list, appends, and saves.
+    updated_messages = list(group.messages) # Create a mutable copy of the JSONB array
     updated_messages.append(db_message)
     group.messages = updated_messages
     db.session.commit()
@@ -402,13 +400,17 @@ def handle_message(data):
     emit('receive_message', emit_message, room=group_number)
     print(f"Message in {group_number} from {display_name}: {message[:20]}...")
 
+
 # =========================================================
-#                        RUN SERVER
+#                        STARTUP
 # =========================================================
 
+# ⚠️ FIX for 'before_first_request' error on Render/Gunicorn: 
+# Call the table creation function in the global scope 
+# (within app context) so it runs when Gunicorn loads the app.
+with app.app_context():
+    create_tables()
+
 if __name__ == '__main__':
-    # When using SQLAlchemy, ensure to run within the Flask application context 
-    # to avoid errors during table creation/DB access.
-    with app.app_context():
-        create_tables()
-        socketio.run(app, debug=True, port=5000)
+    # For local testing
+    socketio.run(app, debug=True, port=5000)
