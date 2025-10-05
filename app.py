@@ -9,9 +9,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__)
 
 # Render provides the database URL via the DATABASE_URL environment variable
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://user:password@localhost:5432/chatdb')
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+DATABASE_URL = os.environ.get('DATABASE_URL')
+#if DATABASE_URL.startswith("postgres://"):
+  #  DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
