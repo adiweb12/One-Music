@@ -1,243 +1,296 @@
+# app.py
+# Single-file Flask + SQLAlchemy + Flask-SocketIO backend
+# Features:
+# - PostgreSQL (via DATABASE_URL env var)
+# - Signup / Login (hashed passwords)
+# - Groups: create, delete, leave, list per-user
+# - Socket.IO real-time: join_chat, send_message, typing, message_history
+# - Saves messages to DB, returns last 50 messages on join
+# - Uses table names safe for PostgreSQL (users, groups, messages)
+
 from flask import Flask, request, jsonify
-from flask_socketio import SocketIO, emit, join_room, close_room
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+from flask_socketio import SocketIO, emit, join_room, leave_room, close_room
+from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import os
-from werkzeug.security import generate_password_hash, check_password_hash
+import logging
 
-# --- Configuration ---
+# ---------- Configuration ----------
 app = Flask(__name__)
+CORS(app)
 
-# ✅ Your actual PostgreSQL database URL
-DATABASE_URL = "postgresql://testbase_opdt_user:CyCuPqaLlU6X3VdNHlxHbb7VzCaZWV2V@dpg-d3h5u633fgac739h6ulg-a/testbase_opdt"
-
+# Use DATABASE_URL env var in Render; fallback to local sqlite for dev
+DATABASE_URL = os.environ.get('DATABASE_URL') or "sqlite:///local_dev.db"
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your_render_secret_key_here')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change_me')
 
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# ----------------------------------------------------------------------
-# 1. Database Models
-# ----------------------------------------------------------------------
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-group_members = db.Table('group_members',
-    db.Column('group_id', db.Integer, db.ForeignKey('group.id', ondelete='CASCADE'), primary_key=True),
-    db.Column('user_id', db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), primary_key=True)
+# ---------- Models ----------
+group_members = db.Table(
+    'group_members',
+    db.Column('group_id', db.Integer, db.ForeignKey('groups.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('user_id', db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), primary_key=True)
 )
 
 class User(db.Model):
-    __tablename__ = 'user'
+    __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     phone = db.Column(db.String(20), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
     username = db.Column(db.String(50), unique=True, nullable=False, default='User')
 
+    def to_dict(self):
+        return {'id': self.id, 'phone': self.phone, 'username': self.username}
+
 class Group(db.Model):
-    __tablename__ = 'group'
+    __tablename__ = 'groups'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), unique=True, nullable=False)
-    room_id = db.Column(db.String(50), unique=True, nullable=False)
-    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    room_id = db.Column(db.String(80), unique=True, nullable=False)
+    creator_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     members = db.relationship('User', secondary=group_members, backref=db.backref('groups', lazy='dynamic'))
 
+    def to_dict(self):
+        return {'id': self.id, 'name': self.name, 'room_id': self.room_id, 'creator_id': self.creator_id}
+
 class Message(db.Model):
-    __tablename__ = 'message'
+    __tablename__ = 'messages'
     id = db.Column(db.Integer, primary_key=True)
-    room_id = db.Column(db.String(50), nullable=False)
+    room_id = db.Column(db.String(80), nullable=False, index=True)
     sender = db.Column(db.String(50), nullable=False)
     message = db.Column(db.Text, nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
-    def to_dict(self):
+    def to_dict(self, current_user=None):
         return {
+            'id': self.id,
             'room_id': self.room_id,
             'sender': self.sender,
             'message': self.message,
-            'isMe': False,
-            'timestamp': self.timestamp.strftime("%H:%M")
+            'timestamp': self.timestamp.strftime("%H:%M"),
+            'isMe': (current_user is not None and self.sender == current_user)
         }
 
-# ----------------------------------------------------------------------
-# 2. Routes (Signup, Login, Groups)
-# ----------------------------------------------------------------------
+# ---------- Helpers ----------
+def make_room_id(name):
+    # sanitized room id
+    return f"group_{name.strip().lower().replace(' ', '_')}"
 
+# ---------- Routes ----------
 @app.route('/signup', methods=['POST'])
 def signup():
-    data = request.get_json()
+    data = request.get_json() or {}
     phone = data.get('phone')
     password = data.get('password')
-    username = data.get('username') or f'User_{phone[-4:]}'
+    username = data.get('username') or (f'User_{phone[-4:]}' if phone else None)
 
-    if not phone or not password:
-        return jsonify({'message': 'Missing phone or password'}), 400
+    if not phone or not password or not username:
+        return jsonify({'message': 'Missing phone, username or password'}), 400
 
-    if User.query.filter_by(phone=phone).first() or User.query.filter_by(username=username).first():
+    if User.query.filter((User.phone == phone) | (User.username == username)).first():
         return jsonify({'message': 'User or phone already exists'}), 409
 
-    hashed_password = generate_password_hash(password)
-    new_user = User(phone=phone, password_hash=hashed_password, username=username)
-
     try:
-        db.session.add(new_user)
+        hashed = generate_password_hash(password)
+        user = User(phone=phone, password_hash=hashed, username=username)
+        db.session.add(user)
         db.session.commit()
-        return jsonify({'message': 'User created successfully', 'username': new_user.username, 'id': new_user.id}), 201
+        return jsonify({'message': 'User created', 'username': user.username, 'id': user.id}), 201
     except Exception as e:
         db.session.rollback()
+        logger.exception("Signup DB error")
         return jsonify({'message': f'Database error: {str(e)}'}), 500
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
+    data = request.get_json() or {}
     phone = data.get('phone')
     password = data.get('password')
+    if not phone or not password:
+        return jsonify({'message': 'Missing phone or password'}), 400
 
     user = User.query.filter_by(phone=phone).first()
     if user and check_password_hash(user.password_hash, password):
         return jsonify({'message': 'Login successful', 'username': user.username, 'id': user.id}), 200
-    else:
-        return jsonify({'message': 'Invalid credentials'}), 401
+    return jsonify({'message': 'Invalid credentials'}), 401
 
 @app.route('/create_group', methods=['POST'])
 def create_group():
-    data = request.get_json()
+    data = request.get_json() or {}
     group_name = data.get('name')
     creator_username = data.get('creator')
 
-    user = User.query.filter_by(username=creator_username).first()
-    if not user:
+    if not group_name or not creator_username:
+        return jsonify({'message': 'Missing name or creator'}), 400
+
+    creator = User.query.filter_by(username=creator_username).first()
+    if not creator:
         return jsonify({'message': 'Creator not found'}), 404
 
-    room_id = f"group_{group_name.lower().replace(' ', '_')}"
+    room_id = make_room_id(group_name)
     if Group.query.filter_by(room_id=room_id).first():
         return jsonify({'message': 'Group name already taken'}), 409
 
-    new_group = Group(name=group_name, room_id=room_id, creator_id=user.id)
-
     try:
-        new_group.members.append(user)
-        db.session.add(new_group)
+        g = Group(name=group_name, room_id=room_id, creator_id=creator.id)
+        g.members.append(creator)
+        db.session.add(g)
         db.session.commit()
         return jsonify({'message': 'Group created', 'room_id': room_id, 'name': group_name}), 201
     except Exception as e:
         db.session.rollback()
+        logger.exception("Create group DB error")
         return jsonify({'message': f'Database error: {str(e)}'}), 500
 
 @app.route('/user_groups/<string:username>', methods=['GET'])
-def get_user_groups(username):
+def user_groups(username):
     user = User.query.filter_by(username=username).first()
     if not user:
         return jsonify({'message': 'User not found'}), 404
-    groups = [{'name': g.name, 'room_id': g.room_id} for g in user.groups.all()]
+    groups = [g.to_dict() for g in user.groups]
     return jsonify({'groups': groups}), 200
 
 @app.route('/delete_group', methods=['POST'])
 def delete_group():
-    data = request.get_json()
+    data = request.get_json() or {}
     room_id = data.get('room_id')
     username = data.get('username')
+    if not room_id or not username:
+        return jsonify({'message': 'Missing room_id or username'}), 400
 
-    group = Group.query.filter_by(room_id=room_id).first()
+    g = Group.query.filter_by(room_id=room_id).first()
     user = User.query.filter_by(username=username).first()
-    if not group or not user:
+    if not g or not user:
         return jsonify({'message': 'Group or User not found'}), 404
-    if group.creator_id != user.id:
+    if g.creator_id != user.id:
         return jsonify({'message': 'Only the creator can delete the group'}), 403
 
     try:
         Message.query.filter_by(room_id=room_id).delete(synchronize_session='fetch')
-        db.session.delete(group)
+        db.session.delete(g)
         db.session.commit()
         socketio.emit('group_deleted', {'room_id': room_id}, room=room_id)
         close_room(room_id)
-        return jsonify({'message': f'Group {room_id} deleted successfully'}), 200
+        return jsonify({'message': f'Group {room_id} deleted'}), 200
     except Exception as e:
         db.session.rollback()
+        logger.exception("Delete group DB error")
         return jsonify({'message': f'Database error: {str(e)}'}), 500
 
 @app.route('/leave_group', methods=['POST'])
 def leave_group():
-    data = request.get_json()
+    data = request.get_json() or {}
     room_id = data.get('room_id')
     username = data.get('username')
+    if not room_id or not username:
+        return jsonify({'message': 'Missing room_id or username'}), 400
 
-    group = Group.query.filter_by(room_id=room_id).first()
+    g = Group.query.filter_by(room_id=room_id).first()
     user = User.query.filter_by(username=username).first()
-    if not group or not user:
+    if not g or not user:
         return jsonify({'message': 'Group or User not found'}), 404
+    if g.creator_id == user.id:
+        return jsonify({'message': 'Creator must delete the group, not leave it'}), 403
 
     try:
-        if group.creator_id == user.id:
-            return jsonify({'message': 'Creator must delete the group, not leave it'}), 403
-        group.members.remove(user)
-        db.session.commit()
-        socketio.emit('receive_message', {
-            'sender': 'SYSTEM',
-            'message': f'{username} has left the group.',
-            'room_id': room_id,
-            'isMe': False,
-            'timestamp': datetime.utcnow().strftime("%H:%M")
-        }, room=room_id)
-        return jsonify({'message': f'{username} left group {room_id}'}), 200
+        if user in g.members:
+            g.members.remove(user)
+            db.session.commit()
+            socketio.emit('receive_message', {
+                'sender': 'SYSTEM',
+                'message': f'{username} has left the group.',
+                'room_id': room_id,
+                'isMe': False,
+                'timestamp': datetime.utcnow().strftime("%H:%M")
+            }, room=room_id)
+            return jsonify({'message': f'{username} left group {room_id}'}), 200
+        else:
+            return jsonify({'message': 'User not a group member'}), 400
     except Exception as e:
         db.session.rollback()
+        logger.exception("Leave group DB error")
         return jsonify({'message': f'Database error: {str(e)}'}), 500
 
-# ----------------------------------------------------------------------
-# 3. Socket Handlers
-# ----------------------------------------------------------------------
+# Simple health route
+@app.route('/')
+def index():
+    return jsonify({'status': 'ok', 'time': datetime.utcnow().isoformat()}), 200
 
+# ---------- Socket Handlers ----------
 @socketio.on('connect')
-def handle_connect():
-    print(f'Client connected: {request.sid}')
+def on_connect():
+    logger.info(f"Client connected: {request.sid}")
     emit('status', {'msg': 'Connected to Chat Server!'})
 
 @socketio.on('join_chat')
 def on_join(data):
     room_id = data.get('room_id')
     username = data.get('username', 'A User')
+    if not room_id:
+        emit('error', {'message': 'Missing room_id'})
+        return
+    join_room(room_id)
+    logger.info(f"{username} joined room {room_id}")
+    # send last 50 messages (ascending)
+    messages = Message.query.filter_by(room_id=room_id).order_by(Message.timestamp.asc()).limit(50).all()
+    emit('message_history', {'messages': [m.to_dict(current_user=username) for m in messages], 'room_id': room_id}, room=request.sid)
+    # announce join to room
+    emit('receive_message', {'sender': 'SYSTEM', 'message': f'{username} joined the room.', 'room_id': room_id, 'isMe': False, 'timestamp': datetime.utcnow().strftime("%H:%M")}, room=room_id)
 
+@socketio.on('typing')
+def on_typing(data):
+    room_id = data.get('room_id')
+    username = data.get('username', 'Someone')
+    is_typing = data.get('typing', True)
     if room_id:
-        join_room(room_id)
-        print(f'{username} joined room: {room_id}')
-        messages = Message.query.filter_by(room_id=room_id).order_by(Message.timestamp.asc()).limit(50).all()
-        emit('message_history', {'messages': [m.to_dict() for m in messages], 'room_id': room_id}, room=request.sid)
+        emit('typing', {'room_id': room_id, 'username': username, 'typing': is_typing}, room=room_id, include_self=False)
 
 @socketio.on('send_message')
-def handle_message(data):
+def on_send_message(data):
     room_id = data.get('room_id')
     sender = data.get('sender', 'Unknown')
-    message_text = data.get('message', 'No content')
+    message_text = data.get('message', '')
+    if not room_id or not message_text:
+        emit('error', {'message': 'Missing room_id or message'})
+        return
 
-    new_message = Message(room_id=room_id, sender=sender, message=message_text)
-    db.session.add(new_message)
-    db.session.commit()
+    try:
+        msg = Message(room_id=room_id, sender=sender, message=message_text, timestamp=datetime.utcnow())
+        db.session.add(msg)
+        db.session.commit()
 
-    response_data = {
-        'sender': sender,
-        'message': message_text,
-        'room_id': room_id,
-        'isMe': False,
-        'timestamp': datetime.utcnow().strftime("%H:%M")
-    }
+        payload = {'sender': sender, 'message': message_text, 'room_id': room_id, 'isMe': False, 'timestamp': msg.timestamp.strftime("%H:%M")}
+        emit('receive_message', payload, room=room_id)
+        logger.info(f"Saved message in {room_id} by {sender}")
+    except Exception as e:
+        db.session.rollback()
+        logger.exception("Send message DB error")
+        emit('error', {'message': 'Database error when saving message'})
 
-    print(f'DB Saved and Broadcast to room {room_id} from {sender}: {message_text}')
-    emit('receive_message', response_data, room=room_id)
+@socketio.on('disconnect')
+def on_disconnect():
+    logger.info(f"Client disconnected: {request.sid}")
 
-# ----------------------------------------------------------------------
-# 4. Run
-# ----------------------------------------------------------------------
-
+# ---------- Run ----------
 if __name__ == '__main__':
+    # Ensure tables exist (good for quick deployments)
     with app.app_context():
         db.create_all()
-        print("✅ Database tables ensured and ready (Migrate enabled).")
+        logger.info("Database tables created/ensured.")
     port = int(os.environ.get('PORT', 5000))
-    print(f"🚀 Starting Flask-SocketIO server on port {port} ...")
+    logger.info(f"Starting server on port {port}")
     socketio.run(app, host='0.0.0.0', port=port)
