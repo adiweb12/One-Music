@@ -15,11 +15,11 @@ load_dotenv()
 # --- Flask App Initialization & Configuration ---
 app = Flask(__name__)
 
-# ⚠️ VALIDATION FIX for TypeError: Expected a string value (SECRET_KEY missing)
+# 1. SECRET_KEY VALIDATION (Fixes the TypeError)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 if not app.config['SECRET_KEY']:
-    # Fail immediately if the secret key is not configured
-    raise ValueError("SECRET_KEY environment variable is not set. Please check your .env or Render configuration.")
+    # Fails immediately if the secret key is not configured, preventing runtime crash
+    raise ValueError("SECRET_KEY environment variable is not set. Cannot run server.")
 # -----------------------------------------------
 
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
@@ -32,7 +32,6 @@ if app.config['SQLALCHEMY_DATABASE_URI'] and app.config['SQLALCHEMY_DATABASE_URI
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
-# Use 'threading' as a safe async mode for Gunicorn/Render deployments
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading') 
 
 # --- Constants ---
@@ -64,11 +63,8 @@ class Group(db.Model):
 def create_tables():
     """Create database tables if they don't exist."""
     with app.app_context():
-        # NOTE: If you need to fix the 'users.id does not exist' error,
-        # temporarily change db.create_all() to:
-        # db.drop_all()
-        # db.create_all()
-        # and then revert it after one successful deployment.
+        # NOTE: If you need to fix the 'users.id does not exist' error, 
+        # temporarily add db.drop_all() before db.create_all() and redeploy once.
         db.create_all()
 
 # =========================================================
@@ -148,7 +144,6 @@ def login():
             'exp': datetime.datetime.utcnow() + datetime.timedelta(days=TOKEN_EXPIRATION_DAYS),
             'iat': datetime.datetime.utcnow()
         }
-        # This line now safely uses a guaranteed string SECRET_KEY
         token = jwt.encode(token_payload, app.config['SECRET_KEY'], algorithm="HS256")
         
         return jsonify({
@@ -220,6 +215,7 @@ def create_group(user_id):
     if Group.query.filter_by(number=group_number).first():
         return jsonify({"success": False, "message": "Group number already in use"}), 409
 
+    # 2. Create and Add Group
     new_group = Group(
         name=group_name,
         number=group_number,
@@ -228,10 +224,13 @@ def create_group(user_id):
         messages=[]
     )
     db.session.add(new_group)
+    # The first item is added to the session
 
+    # 3. Update User
     user = User.query.get(user_id)
     if user:
         user.groups.append(group_number) 
+        # Commit saves ALL changes in the transaction (new group + user update)
         db.session.commit()
         
     return jsonify({"success": True, "message": f"Group '{group_name}' created successfully"}), 201
@@ -302,7 +301,6 @@ def handle_connect():
     token = request.headers.get('token')
     
     if not token:
-        print("Socket connection rejected: No token")
         return False
         
     try:
@@ -318,18 +316,14 @@ def handle_connect():
             'user_id': user_id,
             'display_name': name if name else username
         }
-        print(f"Client connected: {user_session[request.sid]['display_name']} (SID: {request.sid})")
         
     except Exception as e:
-        print(f"Socket connection rejected: Authentication Error: {e}")
         return False
 
 @socketio.on('disconnect')
 def handle_disconnect():
     if request.sid in user_session:
         user_session.pop(request.sid)
-    print(f"Client disconnected: (SID: {request.sid})")
-
 
 @socketio.on('join_group')
 def on_join(data):
@@ -346,7 +340,6 @@ def on_join(data):
     
     if group and user_id in group.members:
         join_room(group_number)
-        print(f"{session_data['display_name']} joined room: {group_number}")
 
 @socketio.on('send_message')
 def handle_message(data):
@@ -371,37 +364,33 @@ def handle_message(data):
     
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # 1. Prepare message object for DB storage
     db_message = {
         "sender_id": user_id,
         "message": message,
         "timestamp": timestamp
     }
 
-    # 2. Save message to PostgreSQL group history (Appending to JSONB)
+    # Save message to PostgreSQL group history (Appending to JSONB)
     updated_messages = list(group.messages)
     updated_messages.append(db_message)
     group.messages = updated_messages
     db.session.commit()
     
-    # 3. Prepare message object for real-time emission
     emit_message = {
         "sender": display_name,
         "message": message,
         "time": timestamp
     }
 
-    # 4. Emit the message to all clients in the group room
     emit('receive_message', emit_message, room=group_number)
-    print(f"Message in {group_number} from {display_name}: {message[:20]}...")
 
 
 # =========================================================
 #                        STARTUP
 # =========================================================
 
-# ⚠️ FIX for 'before_first_request' error on Render/Gunicorn: 
-# Call the table creation function in the global scope (within app context)
+# 2. DEPLOYMENT FIX: Call create_tables in the global scope 
+# (within app context) for Gunicorn/Render compatibility.
 with app.app_context():
     create_tables()
 
