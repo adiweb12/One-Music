@@ -7,7 +7,6 @@ from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, join_room, emit
 from flask_bcrypt import Bcrypt
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 # Load environment variables from .env file
@@ -15,7 +14,14 @@ load_dotenv()
 
 # --- Flask App Initialization & Configuration ---
 app = Flask(__name__)
+
+# ⚠️ VALIDATION FIX for TypeError: Expected a string value (SECRET_KEY missing)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+if not app.config['SECRET_KEY']:
+    # Fail immediately if the secret key is not configured
+    raise ValueError("SECRET_KEY environment variable is not set. Please check your .env or Render configuration.")
+# -----------------------------------------------
+
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -26,7 +32,7 @@ if app.config['SQLALCHEMY_DATABASE_URI'] and app.config['SQLALCHEMY_DATABASE_URI
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
-# Use 'threading' for Render's default server environment
+# Use 'threading' as a safe async mode for Gunicorn/Render deployments
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading') 
 
 # --- Constants ---
@@ -39,12 +45,10 @@ TOKEN_EXPIRATION_DAYS = 7
 
 class User(db.Model):
     __tablename__ = 'users'
-    # PostgreSQL primary key (auto-incrementing integer)
     id = db.Column(db.Integer, primary_key=True) 
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(128), nullable=False)
     name = db.Column(db.String(120), nullable=False)
-    # Stores a list of group numbers (strings)
     groups = db.Column(ARRAY(db.String), default=[]) 
 
 class Group(db.Model):
@@ -52,19 +56,20 @@ class Group(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
     number = db.Column(db.String(80), unique=True, nullable=False)
-    # Foreign key to User.id (integer)
     creator_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False) 
-    # Stores a list of member IDs (integers)
     members = db.Column(ARRAY(db.Integer), default=[])
-    # Stores message history as a JSON array
     messages = db.Column(JSONB, default=[]) 
 
 # --- Database Initialization Function ---
 def create_tables():
-    """Create database tables if they don't exist. Called during startup."""
+    """Create database tables if they don't exist."""
     with app.app_context():
+        # NOTE: If you need to fix the 'users.id does not exist' error,
+        # temporarily change db.create_all() to:
+        # db.drop_all()
+        # db.create_all()
+        # and then revert it after one successful deployment.
         db.create_all()
-
 
 # =========================================================
 #             AUTHENTICATION & HELPER FUNCTIONS
@@ -139,10 +144,11 @@ def login():
 
     if user and bcrypt.check_password_hash(user.password, password):
         token_payload = {
-            'user_id': user.id, # Store SQL ID (integer)
+            'user_id': user.id,
             'exp': datetime.datetime.utcnow() + datetime.timedelta(days=TOKEN_EXPIRATION_DAYS),
             'iat': datetime.datetime.utcnow()
         }
+        # This line now safely uses a guaranteed string SECRET_KEY
         token = jwt.encode(token_payload, app.config['SECRET_KEY'], algorithm="HS256")
         
         return jsonify({
@@ -156,7 +162,6 @@ def login():
 @app.route('/logout', methods=['POST'])
 @auth_required
 def logout(user_id):
-    # JWT logout is client-side, this confirms token validity
     return jsonify({"success": True, "message": "Logged out successfully"}), 200
 
 @app.route('/profile', methods=['POST'])
@@ -202,9 +207,6 @@ def update_profile(user_id):
         return jsonify({"success": True, "message": "Name updated successfully"}), 200
     return jsonify({"success": False, "message": "User not found"}), 404
 
-
-# Group Management
-
 @app.route('/create_group', methods=['POST'])
 @auth_required
 def create_group(user_id):
@@ -218,7 +220,6 @@ def create_group(user_id):
     if Group.query.filter_by(number=group_number).first():
         return jsonify({"success": False, "message": "Group number already in use"}), 409
 
-    # Create Group
     new_group = Group(
         name=group_name,
         number=group_number,
@@ -228,10 +229,8 @@ def create_group(user_id):
     )
     db.session.add(new_group)
 
-    # Add group number to user's list
     user = User.query.get(user_id)
     if user:
-        # Appends to the Postgres ARRAY type
         user.groups.append(group_number) 
         db.session.commit()
         
@@ -253,10 +252,8 @@ def join_group(user_id):
     if user_id in group.members:
         return jsonify({"success": False, "message": "Already a member of this group"}), 400
 
-    # Add user to group's member list (Postgres ARRAY append)
     group.members.append(user_id)
     
-    # Add group to user's groups list (Postgres ARRAY append)
     user = User.query.get(user_id)
     if user:
         user.groups.append(group_number)
@@ -347,7 +344,6 @@ def on_join(data):
     user_id = session_data['user_id']
     group = Group.query.filter_by(number=group_number).first()
     
-    # Security check
     if group and user_id in group.members:
         join_room(group_number)
         print(f"{session_data['display_name']} joined room: {group_number}")
@@ -383,8 +379,7 @@ def handle_message(data):
     }
 
     # 2. Save message to PostgreSQL group history (Appending to JSONB)
-    # NOTE: This loads the list, appends, and saves.
-    updated_messages = list(group.messages) # Create a mutable copy of the JSONB array
+    updated_messages = list(group.messages)
     updated_messages.append(db_message)
     group.messages = updated_messages
     db.session.commit()
@@ -406,8 +401,7 @@ def handle_message(data):
 # =========================================================
 
 # ⚠️ FIX for 'before_first_request' error on Render/Gunicorn: 
-# Call the table creation function in the global scope 
-# (within app context) so it runs when Gunicorn loads the app.
+# Call the table creation function in the global scope (within app context)
 with app.app_context():
     create_tables()
 
