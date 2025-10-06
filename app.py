@@ -40,8 +40,8 @@ class User(db.Model):
 class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     sender_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    receiver_id = db.Column(db.Integer, nullable=True)  # for private chat
-    group_name = db.Column(db.String(50), nullable=True)  # for group chat
+    receiver_id = db.Column(db.Integer, nullable=True)
+    group_name = db.Column(db.String(50), nullable=True)
     content = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -49,7 +49,6 @@ class Message(db.Model):
 # ------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------
-
 @app.route("/")
 def home():
     return jsonify({"message": "Chat App Backend Running 🚀"})
@@ -94,7 +93,6 @@ def login():
 # ------------------------------------------------------------
 # Socket.IO Events
 # ------------------------------------------------------------
-
 @socketio.on("connect")
 def handle_connect():
     logger.info("A user connected ✅")
@@ -150,17 +148,24 @@ def handle_typing(data):
 
 
 # ------------------------------------------------------------
-# Initialize Database
+# Create tables once before first request
 # ------------------------------------------------------------
 @app.before_request
 def create_tables():
     db.create_all()
+    logger.info("Database tables created/ensured.")
 
 
 # ------------------------------------------------------------
-# Run App (Safe for Render)
+# Run Locally (Safe for Render)
 # ------------------------------------------------------------
-if __name__ == "__main__":
+def run_app():
+    """Run locally (Werkzeug only if needed)."""
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Starting server on port {port}")
+    logger.info(f"Starting local server on port {port}")
     socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
+
+
+# Only run locally — Render’s Gunicorn won’t hit this block
+if __name__ == "__main__":
+    run_app()
