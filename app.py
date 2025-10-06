@@ -13,7 +13,7 @@ import logging
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "supersecret")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
-    "DATABASE_URL", "postgresql://user:password@localhost:5432/chatdb"
+    "DATABASE_URL", "postgresql://testbase_nwgc_user:od9FfZzQokYO5h6G6xGmELeNLURmCquj@dpg-d3hsqobuibrs73b6iss0-a/testbase_nwgc"
 )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
