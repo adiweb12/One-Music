@@ -148,24 +148,17 @@ def handle_typing(data):
 
 
 # ------------------------------------------------------------
-# Create tables once before first request
+# Create DB tables ONCE when app starts
 # ------------------------------------------------------------
-@app.before_request
-def create_tables():
+with app.app_context():
     db.create_all()
-    logger.info("Database tables created/ensured.")
+    logger.info("Database tables created/ensured once at startup ✅")
 
 
 # ------------------------------------------------------------
-# Run Locally (Safe for Render)
+# Run Locally (Render uses Gunicorn)
 # ------------------------------------------------------------
-def run_app():
-    """Run locally (Werkzeug only if needed)."""
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Starting local server on port {port}")
     socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
-
-
-# Only run locally — Render’s Gunicorn won’t hit this block
-if __name__ == "__main__":
-    run_app()
