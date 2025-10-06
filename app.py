@@ -23,9 +23,9 @@ app = Flask(__name__)
 CORS(app)
 
 # Use DATABASE_URL env var in Render; fallback to local sqlite for dev
-DATABASE_URL = os.environ.get('DATABASE_URL') or "sqlite:///local_dev.db"
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+DATABASE_URL = os.environ.get('DATABASE_URL')
+#if DATABASE_URL.startswith("postgres://"):
+    #DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
