@@ -1,12 +1,5 @@
 # app.py
-# Single-file Flask + SQLAlchemy + Flask-SocketIO backend
-# Features:
-# - PostgreSQL (via DATABASE_URL env var)
-# - Signup / Login (hashed passwords)
-# - Groups: create, delete, leave, list per-user
-# - Socket.IO real-time: join_chat, send_message, typing, message_history
-# - Saves messages to DB, returns last 50 messages on join
-# - Uses table names safe for PostgreSQL (users, groups, messages)
+# Production-ready Flask + SQLAlchemy + Flask-SocketIO backend
 
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
@@ -22,12 +15,13 @@ import logging
 app = Flask(__name__)
 CORS(app)
 
-# Use DATABASE_URL env var in Render; fallback to local sqlite for dev
+# DATABASE
 DATABASE_URL = os.environ.get('DATABASE_URL')
-#if DATABASE_URL.startswith("postgres://"):
-    #DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+# Fallback to SQLite for dev
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL or "sqlite:///chat.db"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change_me')
 
@@ -35,7 +29,7 @@ db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# Setup logging
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -87,8 +81,12 @@ class Message(db.Model):
 
 # ---------- Helpers ----------
 def make_room_id(name):
-    # sanitized room id
     return f"group_{name.strip().lower().replace(' ', '_')}"
+
+# ---------- Ensure tables exist ----------
+with app.app_context():
+    db.create_all()
+    logger.info("Database tables created/ensured.")
 
 # ---------- Routes ----------
 @app.route('/signup', methods=['POST'])
@@ -133,7 +131,6 @@ def create_group():
     data = request.get_json() or {}
     group_name = data.get('name')
     creator_username = data.get('creator')
-
     if not group_name or not creator_username:
         return jsonify({'message': 'Missing name or creator'}), 400
 
@@ -225,7 +222,6 @@ def leave_group():
         logger.exception("Leave group DB error")
         return jsonify({'message': f'Database error: {str(e)}'}), 500
 
-# Simple health route
 @app.route('/')
 def index():
     return jsonify({'status': 'ok', 'time': datetime.utcnow().isoformat()}), 200
@@ -245,10 +241,8 @@ def on_join(data):
         return
     join_room(room_id)
     logger.info(f"{username} joined room {room_id}")
-    # send last 50 messages (ascending)
     messages = Message.query.filter_by(room_id=room_id).order_by(Message.timestamp.asc()).limit(50).all()
     emit('message_history', {'messages': [m.to_dict(current_user=username) for m in messages], 'room_id': room_id}, room=request.sid)
-    # announce join to room
     emit('receive_message', {'sender': 'SYSTEM', 'message': f'{username} joined the room.', 'room_id': room_id, 'isMe': False, 'timestamp': datetime.utcnow().strftime("%H:%M")}, room=room_id)
 
 @socketio.on('typing')
@@ -286,11 +280,6 @@ def on_disconnect():
     logger.info(f"Client disconnected: {request.sid}")
 
 # ---------- Run ----------
-if __name__ == '__main__':
-    # Ensure tables exist (good for quick deployments)
-    with app.app_context():
-        db.create_all()
-        logger.info("Database tables created/ensured.")
-    port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Starting server on port {port}")
-    socketio.run(app, host='0.0.0.0', port=port)
+port = int(os.environ.get('PORT', 5000))
+logger.info(f"Starting server on port {port}")
+socketio.run(app, host='0.0.0.0', port=port)
